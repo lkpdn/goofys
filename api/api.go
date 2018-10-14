@@ -57,13 +57,39 @@ type Config struct {
 	Foreground bool
 }
 
-func Mount(
+func GetMountConfig(
 	ctx context.Context,
 	bucketName string,
-	config *Config) (fs *Goofys, mfs *fuse.MountedFileSystem, err error) {
+	flags *FlagStorage) (mountCfg *fuse.MountConfig) {
+
+	fuseLog := GetLogger("fuse")
+
+	mountCfg = &fuse.MountConfig{
+		FSName:                  bucketName,
+		Options:                 flags.MountOptions,
+		ErrorLogger:             GetStdLogger(NewLogger("fuse"), logrus.ErrorLevel),
+		DisableWritebackCaching: true,
+	}
+
+	if flags.DebugFuse {
+		fuseLog.Level = logrus.DebugLevel
+		log.Level = logrus.DebugLevel
+		mountCfg.DebugLogger = GetStdLogger(fuseLog, logrus.DebugLevel)
+	}
+	return
+}
+
+func FuseServe(
+	ctx context.Context,
+	bucketName string,
+	devFd uintptr,
+	config *Config,
+	ready chan error) (fs *Goofys, mfs *fuse.MountedFileSystem, err error) {
 
 	var flags FlagStorage
 	copier.Copy(&flags, config)
+
+	mountCfg := GetMountConfig(ctx, bucketName, &flags)
 
 	awsConfig := (&aws.Config{
 		Region: &flags.Region,
@@ -103,27 +129,7 @@ func Mount(
 	}
 	server := fuseutil.NewFileSystemServer(fs)
 
-	fuseLog := GetLogger("fuse")
-
-	// Mount the file system.
-	mountCfg := &fuse.MountConfig{
-		FSName:                  bucketName,
-		Options:                 flags.MountOptions,
-		ErrorLogger:             GetStdLogger(NewLogger("fuse"), logrus.ErrorLevel),
-		DisableWritebackCaching: true,
-	}
-
-	if flags.DebugFuse {
-		fuseLog.Level = logrus.DebugLevel
-		log.Level = logrus.DebugLevel
-		mountCfg.DebugLogger = GetStdLogger(fuseLog, logrus.DebugLevel)
-	}
-
-	mfs, err = fuse.Mount(flags.MountPoint, server, mountCfg)
-	if err != nil {
-		err = fmt.Errorf("Mount: %v", err)
-		return
-	}
+	mfs, err = fuse.FuseServe(server, flags.MountPoint, devFd, mountCfg, ready)
 
 	if len(flags.Cache) != 0 {
 		log.Infof("Starting catfs %v", flags.Cache)
